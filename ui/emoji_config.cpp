@@ -853,16 +853,24 @@ void Instance::checkUniversalImages() {
 		_sprites.clear();
 	}
 	if (!Universal->ensureLoaded()) {
+		_generating = nullptr;
+		_sprites.clear();
 		if (Universal->id() != 0) {
 			ClearCurrentSetIdSync();
 		} else {
 			_unsupported = true;
+			LOG(("App Error: Could not load default emoji sprites."));
 		}
+		return;
 	}
+	_unsupported = false;
 }
 
 void Instance::generateCache() {
 	checkUniversalImages();
+	if (_unsupported || !Universal) {
+		return;
+	}
 
 	const auto cachePath = internal::CacheFileFolder();
 	if (cachePath.isEmpty()) {
@@ -870,6 +878,9 @@ void Instance::generateCache() {
 	}
 	const auto size = _size;
 	const auto index = _sprites.size();
+	if (index >= SpritesCount) {
+		return;
+	}
 	crl::async([
 		=,
 		universal = Universal,
