@@ -63,8 +63,7 @@ base::options::toggle OptionUseQtRhi({
 	.description = "Render the main window on the GPU instead of the CPU.",
 	.defaultValue = true,
 	.scope = [] {
-		return (!Platform::IsWindows() || Platform::IsWindowsARM64())
-			&& QLibraryInfo::version() >= QVersionNumber(6, 7);
+		return QLibraryInfo::version() >= QVersionNumber(6, 7);
 	},
 	.restartRequired = true,
 });
@@ -84,7 +83,7 @@ base::options::toggle OptionEnableVulkanRhi({
 	.name = "Enable Vulkan renderer",
 	.description = "Use Vulkan for GPU rendering "
 		"instead of OpenGL when it is available.",
-	.defaultValue = false,
+	.defaultValue = true,
 	.scope = [] { return VulkanRhiAvailable(); },
 	.restartRequired = true,
 });
@@ -383,11 +382,15 @@ Capabilities CheckCapabilities(QWidget *widget) {
 		LOG(("OpenGL Extensions: %1").arg(list.join(", ")));
 
 #ifdef DESKTOP_APP_USE_ANGLE
-		auto egllist = QStringList();
-		for (const auto &extension : EGLExtensions(context)) {
-			egllist.append(QString::fromLatin1(extension));
+		// A desktop GL context has no EGL display, asking for one only
+		// makes the platform plugin complain about an invalid key.
+		if (context->isOpenGLES()) {
+			auto egllist = QStringList();
+			for (const auto &extension : EGLExtensions(context)) {
+				egllist.append(QString::fromLatin1(extension));
+			}
+			LOG(("EGL Extensions: %1").arg(egllist.join(", ")));
 		}
-		LOG(("EGL Extensions: %1").arg(egllist.join(", ")));
 #endif // DESKTOP_APP_USE_ANGLE
 
 		return true;
@@ -496,6 +499,25 @@ void ForceDisable(bool disable) {
 #ifdef DESKTOP_APP_USE_ANGLE
 void ConfigureANGLE() {
 	qunsetenv("DESKTOP_APP_QT_ANGLE_PLATFORM");
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+	// Restarted instance inherits variables set below, marker tells them apart
+	// from user ones, which are left alone together with backend file choice.
+	if (qEnvironmentVariableIntValue("DESKTOP_APP_QT_OPENGL_DEFAULT")) {
+		qunsetenv("QT_OPENGL");
+		qunsetenv("QT_ANGLE_PLATFORM");
+	} else if (!qEnvironmentVariableIsEmpty("QT_OPENGL")
+		|| !qEnvironmentVariableIsEmpty("QT_ANGLE_PLATFORM")) {
+		return;
+	}
+	// Old Intel WGL drivers blit SwapBuffers output at style frame offset,
+	// ignoring custom WM_NCCALCSIZE client area, so prefer ANGLE like Qt 5.
+	qputenv("DESKTOP_APP_QT_OPENGL_DEFAULT", "1");
+	qputenv("QT_OPENGL", "angle");
+	if (!Platform::IsWindows8OrGreater()) {
+		// Default D3D11 EGL display is absent without Platform Update.
+		qputenv("QT_ANGLE_PLATFORM", "d3d9");
+	}
+#endif // Qt >= 6
 	const auto path = Ui::Integration::Instance().angleBackendFilePath();
 	if (path.isEmpty()) {
 		return;
@@ -506,10 +528,22 @@ void ConfigureANGLE() {
 	}
 	auto bytes = f.read(32);
 	const auto check = [&](const char *backend, ANGLE angle) {
-		if (bytes.startsWith(backend)) {
-			ResolvedANGLE = angle;
-			qputenv("DESKTOP_APP_QT_ANGLE_PLATFORM", backend);
+		if (!bytes.startsWith(backend)) {
+			return;
 		}
+		ResolvedANGLE = angle;
+#if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
+		qputenv("DESKTOP_APP_QT_ANGLE_PLATFORM", backend);
+#else // Qt < 6
+		if (angle != ANGLE::D3D9 && !Platform::IsWindows8OrGreater()) {
+			// D3D11 needs Platform Update, keep d3d9 default set above.
+			ResolvedANGLE = ANGLE::D3D9;
+			return;
+		}
+		// Qt 6 picks ANGLE backend by QT_ANGLE_PLATFORM, read lazily on
+		// first context creation.
+		qputenv("QT_ANGLE_PLATFORM", backend);
+#endif // Qt >= 6
 	};
 	//check("gl", ANGLE::OpenGL);
 	check("d3d9", ANGLE::D3D9);
